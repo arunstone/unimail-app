@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-app font-sans text-body text-primary antialiased;
+}
+
+@layer base {
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent/60;
+  }
+  button,
+  a {
+    @apply transition-colors duration-150;
+  }
+}
+
+@layer components {
+  /* Primary action: gradient fill, lifts on hover, presses on click */
+  .btn-primary {
+    @apply rounded-lg bg-accent-gradient text-body font-semibold text-white transition-[transform,filter,opacity] duration-150 hover:brightness-110 active:scale-[0.98] disabled:opacity-40 disabled:hover:brightness-100 disabled:active:scale-100;
+  }
+  /* Secondary action: outlined, accent on hover */
+  .btn-outline {
+    @apply rounded-lg border border-divider text-body text-muted transition-colors hover:border-accent hover:text-primary;
+  }
+  /* Standard text input */
+  .input-base {
+    @apply w-full rounded-lg border border-divider bg-app/70 text-body text-primary outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-muted focus:border-accent focus:ring-2 focus:ring-accent/25;
+  }
+  /* Raised card surface */
+  .card {
+    @apply rounded-xl border border-divider bg-surface shadow-card;
+  }
+}
+
+/* slim dark scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #262b3f transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #262b3f;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes slide-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.animate-slide-up {
+  animation: slide-up 0.25s ease-out;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-up {
+  animation: fade-up 0.3s ease-out;
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.animate-scale-in {
+  animation: scale-in 0.18s ease-out;
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.animate-slide-in-right {
+  animation: slide-in-right 0.22s ease-out;
+}
+
+/* moving highlight for loading skeletons */
+.shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  transform: translateX(-100%);
+  animation: shimmer 1.6s infinite;
+}
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}

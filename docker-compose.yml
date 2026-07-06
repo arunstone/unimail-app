@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-unimail}
+      POSTGRES_USER: ${POSTGRES_USER:-unimail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unimail}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-unimail}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-unimail}:${POSTGRES_PASSWORD:-unimail}@postgres:5432/${POSTGRES_DB:-unimail}
+    networks:
+      - default
+      - proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # S3-compatible attachment storage. Internal network only — files are
+  # streamed to clients through the backend, never served directly.
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-unimail}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Send-only relay for system mail (verification / password reset).
+  # Delivers straight to recipients' mail servers from this VPS — may land
+  # in spam until SPF/DKIM DNS records are in place. Internal network only.
+  smtp:
+    image: boky/postfix
+    restart: unless-stopped
+    environment:
+      ALLOWED_SENDER_DOMAINS: example.com   # your domain
+      HOSTNAME: mail.example.com            # your mail hostname
+    healthcheck:
+      test: ["CMD", "sh", "-c", "/scripts/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    networks:
+      - proxy
+    depends_on:
+      - backend
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  pgdata:
+  miniodata:

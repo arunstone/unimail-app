@@ -1,0 +1,13 @@
+# Secrets — never commit
+.env
+
+# Dependencies / build output
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+
+# Runtime data
+*.sqlite
+*.db
+data/
