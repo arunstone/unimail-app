@@ -1,159 +1,209 @@
-# Unimail — Self-Hosting Setup Manual
+# Unimail — Complete Self-Hosting Guide (from zero)
 
-Step-by-step guide to run your own Unimail instance. No prior DevOps
-experience required — if you can paste commands into a terminal, you can
-run this.
+This guide is for someone starting with **nothing** — no server, no domain —
+who wants their own Unimail running on the public internet. It explains
+**what every piece is, why you need it, and what it costs**, then walks
+through setting each one up.
 
-## 1. What you need
+---
 
-- A Linux server (a small VPS with 2 GB RAM is plenty) or any machine with
-  **Docker** and **Docker Compose v2** installed.
-- Optional, for production use: a domain name and ports 80/443 reachable.
+## 1. The big picture — what you need and why
 
-Install Docker if you don't have it:
+| Piece | What it is | Why Unimail needs it | Typical cost |
+|---|---|---|---|
+| **VPS (server)** | A small Linux computer rented in a datacenter (Contabo, Hetzner, DigitalOcean…) | Runs the app 24/7 so you can reach your mail from anywhere | ~$5–8/month |
+| **Domain name** | Your address on the internet, e.g. `example.com`, bought from a registrar like **Namecheap** | People (and you) reach the app at `https://mail.example.com` instead of a raw IP; also required for HTTPS certificates | ~$10/year |
+| **DNS records** | Settings at your registrar that map names → your server | `mail.example.com → your VPS IP` is one DNS "A record" | free |
+| **Cloudflare** *(optional)* | A free service that sits in front of your website | Hides your server's real IP, blocks bots/DDoS, caches static files | free plan is fine |
+| **Docker** | Software that runs each part of Unimail in isolated containers | One command starts the whole stack identically on any server | free |
+| **PostgreSQL** | The database (runs inside Docker, automatic) | Stores your synced emails, contacts, calendar, settings | free, included |
+| **MinIO (S3 storage)** | An object store — like your own private Amazon S3 (runs inside Docker, automatic) | Stores email **attachments** outside the database, any size, streamed on demand. Without it Unimail falls back to re-downloading attachments from the mail server each time | free, included |
+| **Reverse proxy + HTTPS** | nginx + a free Let's Encrypt certificate | Gives you the padlock (`https://`) and routes traffic to the right container | free |
+| **Your own mail server** *(optional)* | docker-mailserver — real `you@example.com` mailboxes | Only if you want to HOST mail on your domain. Unimail itself is a client and works fine with Gmail/Yahoo/etc. accounts | free software |
+
+**Minimum path:** VPS + Docker → Unimail runs on an IP address.
+**Recommended path:** all of the above → a proper `https://mail.example.com`.
+
+---
+
+## 2. Rent a VPS
+
+Any provider works (Contabo, Hetzner, DigitalOcean, Vultr…). Pick:
+
+- Ubuntu 22.04 or newer, **2 GB RAM minimum** (4 GB comfortable)
+- Note the server's **public IP address** — you'll use it everywhere below
+
+Some providers (e.g. Contabo) also have a **panel-level firewall** — if a
+port doesn't respond later even though the server looks fine, check that
+panel and open the port there too.
+
+Install Docker on the VPS:
 
 ```bash
 curl -fsSL https://get.docker.com | sh
 ```
 
-## 2. Get the code
+## 3. Buy a domain and point it at your server (Namecheap example)
+
+1. Buy a domain at [namecheap.com](https://www.namecheap.com) (any registrar
+   works the same way).
+2. In Namecheap → *Domain List → Manage → Advanced DNS*, add an **A record**:
+
+   | Type | Host | Value |
+   |---|---|---|
+   | A | `mail` | *your VPS IP* |
+
+   This makes `mail.example.com` point at your server. (Use host `@` instead
+   if you want the bare `example.com`.)
+3. Wait a few minutes, then check it propagated: `ping mail.example.com`
+   should show your VPS IP.
+
+**What DNS is doing here:** it's just a public phone book. Every record maps
+a name to your machine — nothing more.
+
+## 4. (Optional) Put Cloudflare in front
+
+Cloudflare's free plan gives you DDoS protection and hides your server's
+real IP from visitors.
+
+1. Sign up at cloudflare.com, add your domain — it imports your DNS records.
+2. At Namecheap, replace the nameservers with the two Cloudflare gives you.
+3. In Cloudflare DNS, set the record for the **web app** (e.g. `mail`) to
+   **Proxied** (orange cloud).
+
+⚠️ **Important if you later run your own mail server:** records used for
+actual email (`MX`, and the hostname the MX points to) must be set to
+**DNS only** (grey cloud). Cloudflare's proxy only carries web traffic —
+proxied mail records silently break SMTP/IMAP.
+
+## 5. Install Unimail
 
 ```bash
 git clone https://github.com/arunstone/unimail-app.git unimail
 cd unimail
-```
-
-## 3. Configure the environment
-
-```bash
 cp .env.example .env
 ```
 
-Open `.env` and set at minimum:
+Edit `.env` — what each value is **for**:
 
-| Variable | What to put there |
-|---|---|
-| `POSTGRES_PASSWORD` | Any strong random password |
-| `JWT_SECRET` | Any long random string (signs login tokens) |
-| `FERNET_KEY` | Encrypts mail passwords at rest — generate it with the command below |
-| `FRONTEND_ORIGIN` | URL you'll open in the browser, e.g. `http://localhost:5173` or `https://mail.example.com` |
-| `BACKEND_URL` | Public URL of the API, e.g. `http://localhost:8000` or `https://mail.example.com` |
+| Variable | What it's for | What to put |
+|---|---|---|
+| `POSTGRES_PASSWORD` | Protects the database | any strong random string |
+| `JWT_SECRET` | Signs login sessions — anyone with it could forge logins | long random string |
+| `FERNET_KEY` | **Encrypts your mail passwords at rest** in the database, so a DB leak doesn't leak your mailbox credentials | generate: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `FRONTEND_ORIGIN` | The URL browsers will use (CORS protection + OAuth redirects) | `https://mail.example.com` |
+| `BACKEND_URL` | Public URL of the API (builds OAuth callback URLs) | `https://mail.example.com` |
+| `MINIO_ROOT_PASSWORD`, `S3_SECRET_KEY` | Lock your attachment store | random strings |
+| `SYSTEM_SMTP_*` | An SMTP account Unimail uses to send **its own** emails (signup verification, password reset). Leave empty to skip verification | any SMTP server + login |
 
-Generate the Fernet key:
+**About MinIO / S3:** when a mailbox syncs, attachments are copied into
+MinIO (an S3-compatible object store running as a container on your own
+server — your data never goes to Amazon). The database stays small, and
+attachments of any size download instantly. If you leave the S3 variables
+empty, Unimail still works — it just re-fetches attachments from the mail
+provider over IMAP each time you download one.
 
-```bash
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-Everything else can stay at its default for a first run. `MINIO_ROOT_PASSWORD`
-and `S3_SECRET_KEY` enable the attachment object store — set them to random
-strings, or leave the storage variables empty to fall back to fetching
-attachments from IMAP on demand.
-
-## 4. Start it
+Start everything:
 
 ```bash
 docker compose up -d --build
 ```
 
-First build takes a few minutes. Then open:
+This launches: backend (FastAPI), frontend (React), PostgreSQL, MinIO, and
+a small outbound-SMTP helper. First build takes a few minutes.
 
-- **App:** http://localhost:5173
-- **API docs:** http://localhost:8000/docs
+## 6. HTTPS with nginx + Let's Encrypt
 
-Create your account at `/register` and sign in.
+**Why:** browsers require HTTPS for logins, notifications, and OAuth — and
+you're typing mail passwords into this app.
 
-> If `SYSTEM_SMTP_HOST` is empty (the default), signup email verification is
-> skipped and new accounts are active immediately. Point it at any SMTP
-> server to enable verification and password-reset emails.
+On the VPS:
 
-## 5. Connect a mailbox
+```bash
+apt install -y nginx certbot python3-certbot-nginx
+certbot --nginx -d mail.example.com   # free certificate, auto-renews
+```
 
-Click **＋ Add Account**.
-
-**Any IMAP provider (works out of the box):**
-Type your address and Unimail auto-detects the IMAP/SMTP servers. Note that
-most big providers require an *app password* instead of your normal one:
-
-- Yahoo: account security → generate app password
-- Gmail: enable 2-Step Verification, then create an app password
-  (host `imap.gmail.com` / `smtp.gmail.com`)
-
-**Gmail / Outlook via OAuth (optional, nicer UX):**
-
-1. Create an OAuth client — Google Cloud Console → *APIs & Services →
-   Credentials* (type: Web application), or Azure Portal → *App
-   registrations*.
-2. Register **both** redirect URIs (replace with your `BACKEND_URL`):
-   - `<BACKEND_URL>/api/accounts/oauth/gmail/callback`
-   - `<BACKEND_URL>/api/auth/oauth/gmail/callback`
-   (for Outlook: the same two paths with `outlook`)
-3. Put `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (or `OUTLOOK_*`) in
-   `.env` and restart: `docker compose up -d backend`
-4. "Continue with Google/Microsoft" buttons appear on the login page
-   automatically.
-
-## 6. Production deployment (domain + HTTPS)
-
-Run Unimail behind any reverse proxy. Example with nginx:
+nginx site config:
 
 ```nginx
 server {
     listen 443 ssl;
     server_name mail.example.com;
-    # ssl_certificate ... (use certbot / Let's Encrypt)
+    # certbot fills in the ssl_certificate lines
 
-    client_max_body_size 25m;          # attachment uploads
+    client_max_body_size 25m;              # attachment uploads
 
     location /api/ {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8000;  # backend container
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
     location / {
-        proxy_pass http://127.0.0.1:5173;
+        proxy_pass http://127.0.0.1:5173;  # frontend container
         proxy_set_header Host $host;
     }
 }
 ```
 
-Then set in `.env`:
+Reload nginx, open `https://mail.example.com`, register your account, done.
 
-```
-FRONTEND_ORIGIN=https://mail.example.com
-BACKEND_URL=https://mail.example.com
-```
+**Recommended hardening:** add nginx `limit_req` rate limiting on
+`/api/auth/` so bots can't hammer your login endpoint.
 
-and restart: `docker compose up -d`.
+## 7. Connect your mailboxes
 
-Recommended extras: rate-limit `/api/auth/` at the proxy, and put the site
-behind Cloudflare or similar if you like.
+Click **＋ Add Account** in the app.
 
-## 7. Good to know
+- **Any IMAP provider:** type your address — Unimail auto-detects the
+  servers (Mozilla ISP database + autoconfig + port probing). Big providers
+  need an **app password** (Yahoo: account security → app password; Gmail:
+  enable 2-Step Verification → app passwords).
+- **Gmail/Outlook OAuth buttons** (optional, nicer): create an OAuth client
+  in Google Cloud Console / Azure, register both callback URLs
+  (`<BACKEND_URL>/api/accounts/oauth/<provider>/callback` and
+  `<BACKEND_URL>/api/auth/oauth/<provider>/callback`), put the client
+  ID/secret in `.env`, restart the backend.
 
-- **Sync cadence:** every account re-syncs in the background every
-  `SYNC_INTERVAL_MINUTES` (default 5); the ⟳ button syncs on demand.
-- **Junk filter:** activates per user after you mark **3 spam and 3 ham**
-  messages (🚫 / ✓ buttons on any email). It learns your mail only.
-- **Filter rules, signatures, notifications:** all under ⚙ Settings.
-- **Calendar:** meeting invites (.ics) arriving in connected mailboxes show
-  up automatically on the 📅 Calendar tab.
-- **Backups:** your state lives in the `pgdata` and `miniodata` Docker
-  volumes — back those up and you can rebuild everything else from this
-  repo.
+## 8. (Optional) Host your own mailboxes — `you@example.com`
 
-## 8. Updating
+Unimail is a **client**; this step gives it something of your own to
+connect to. Use [docker-mailserver](https://github.com/docker-mailserver/docker-mailserver).
+The software is the easy part — **deliverability is the real work**, and
+it's all DNS:
 
-```bash
-git pull
-docker compose up -d --build
-```
+| Record | What it's for |
+|---|---|
+| `MX` | Tells the world "mail for @example.com goes to this server" |
+| `SPF` (TXT) | Lists which servers may send as your domain — without it, Gmail junks or rejects you |
+| `DKIM` (TXT) | Cryptographic signature on every mail proving it wasn't forged |
+| `DMARC` (TXT) | Policy telling receivers what to do when SPF/DKIM fail |
+| `PTR` (reverse DNS) | Set at your **VPS provider**: IP → `mail.example.com`. Big providers refuse mail from IPs without it |
 
-## 9. Optional: run your own mail server
+Also: open ports **25, 465, 587, 993** (server firewall *and* provider
+panel), and remember the Cloudflare warning from step 4 — mail DNS records
+stay grey-cloud.
 
-Unimail is a *client* — it connects to mailboxes anywhere. If you also want
-to host real mailboxes on your own domain (`you@example.com`), pair it with
-[docker-mailserver](https://github.com/docker-mailserver/docker-mailserver):
-set up DKIM/SPF/DMARC DNS records, then connect the mailbox to Unimail like
-any other IMAP account. Done right, self-hosted mail scores 10/10 on
-[mail-tester.com](https://www.mail-tester.com).
+Test with [mail-tester.com](https://www.mail-tester.com) until you score
+10/10 — then your mail actually lands in inboxes. Finally, add the new
+mailbox to Unimail like any other IMAP account.
+
+## 9. Operating it
+
+- **Backups:** everything lives in the `pgdata` (database) and `miniodata`
+  (attachments) Docker volumes — back those two up and the rest is
+  rebuildable from this repo.
+- **Updates:** `git pull && docker compose up -d --build`
+- **Junk filter:** activates per user after marking 3 spam + 3 ham (🚫/✓
+  buttons); it trains only on your mail, on your server.
+- **Sync:** background sync every 5 minutes (`SYNC_INTERVAL_MINUTES`), ⟳
+  for on-demand.
+
+## 10. Total cost of ownership
+
+| Item | Cost |
+|---|---|
+| VPS | ~$5–8 / month |
+| Domain | ~$10 / year |
+| Cloudflare, HTTPS certs, all software | $0 |
+| **Total** | **≈ $7 / month** for private, unified, own-your-data email |
